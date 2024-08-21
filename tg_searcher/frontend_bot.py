@@ -117,9 +117,10 @@ class BotFrontend:
         self.backend.excluded_chats.add((await self.bot.get_me()).id)
 
         try:
-            sb = ['bot 初始化完成\n\n', await self.backend.get_index_status()]
+            msg_head = 'bot 初始化完成\n\n'
+            stat_text = await self.backend.get_index_status(length_limit=4000 - len(msg_head))
             # TODO: pass structured status message from backend
-            await self.bot.send_message(self._admin, brief_content(''.join(sb), 4096), parse_mode='html')
+            await self.bot.send_message(self._admin, msg_head + stat_text, parse_mode='html')
         except Exception as e:
             await self.bot.send_message(self._admin, f'Error on get_index_status: {e}')
 
@@ -276,7 +277,7 @@ class BotFrontend:
             return
         start_time = time()
         q: str = event.raw_text
-        if q.startswith('/'):
+        if q.startswith('/') or q.startswith('@'):
             first_space = q.find(' ')
             if first_space < 0:
                 first_space = len(q)
@@ -427,17 +428,17 @@ class BotFrontend:
         return ''.join(string_builder)
 
     def _render_respond_buttons(self, result, cur_page_num):
-        former_page, former_text = (None, ' ') \
+        former_page, former_text = ('', ' ') \
             if cur_page_num == 1 \
             else (f'search_page={cur_page_num - 1}', '上一页⬅️')
-        next_page, next_text = (None, ' ') \
+        next_page, next_text = ('', ' ') \
             if result.is_last_page \
             else (f'search_page={cur_page_num + 1}', '➡️下一页')
         total_pages = - (- result.total_results // self._cfg.page_len)  # use floor to simulate ceil function
         return [
             [
                 Button.inline(former_text, former_page),
-                Button.inline(f'{cur_page_num} / {total_pages}', None),
+                Button.inline(f'{cur_page_num} / {total_pages}', ''),
                 Button.inline(next_text, next_page),
             ]
         ]

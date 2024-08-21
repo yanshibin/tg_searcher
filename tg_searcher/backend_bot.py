@@ -41,8 +41,14 @@ class BackendBot:
         self._logger.info(f'Init backend bot')
 
         for chat_id in self.monitored_chats:
-            chat_name = await self.translate_chat_id(chat_id)
-            self._logger.info(f'Ready to monitor "{chat_name}" ({chat_id})')
+            try:
+                chat_name = await self.translate_chat_id(chat_id)
+                self._logger.info(f'Ready to monitor "{chat_name}" ({chat_id})')
+            except Exception as e:
+                self._logger.error(f'exception on get monitored chat (id={chat_id}): {e}')
+                self.monitored_chats.remove(chat_id)
+                self._indexer.ix.delete_by_term('chat_id', chat_id)
+                self._logger.error(f'remove chat (id={chat_id}) from monitor list and clear its index')
 
         self._register_hooks()
 
@@ -60,10 +66,10 @@ class BackendBot:
             return self._indexer.ix.is_empty()
 
     async def download_history(self, chat_id: int, min_id: int, max_id: int, call_back=None):
-        writer = self._indexer.ix.writer()
         share_id = get_share_id(chat_id)
         self._logger.info(f'Downloading history from {share_id} ({min_id=}, {max_id=})')
         self.monitored_chats.add(share_id)
+        msg_list = []
         async for tg_message in self.session.iter_messages(chat_id, min_id=min_id, max_id=max_id):
             if msg_text := self._extract_text(tg_message):
                 url = f'https://t.me/c/{share_id}/{tg_message.id}'
@@ -75,11 +81,16 @@ class BackendBot:
                     post_time=datetime.fromtimestamp(tg_message.date.timestamp()),
                     sender=sender,
                 )
-                self._indexer.add_document(msg, writer)
-                self.newest_msg[share_id] = msg
+                msg_list.append(msg)
                 if call_back:
                     await call_back(tg_message.id)
+        self._logger.info(f'fetching history from {share_id} complete, start writing index')
+        writer = self._indexer.ix.writer()
+        for msg in msg_list:
+            self._indexer.add_document(msg, writer)
+            self.newest_msg[share_id] = msg
         writer.commit()
+        self._logger.info(f'write index commit ok')
 
     def clear(self, chat_ids: Optional[List[int]] = None):
         if chat_ids is not None:
@@ -95,31 +106,43 @@ class BackendBot:
     async def find_chat_id(self, q: str) -> List[int]:
         return await self.session.find_chat_id(q)
 
-    async def get_index_status(self):
+    async def get_index_status(self, length_limit: int = 4000):
         # TODO: add session and frontend name
+        cur_len = 0
         sb = [  # string builder
             f'后端 "{self.id}"（session: "{self.session.name}"）总消息数: <b>{self._indexer.ix.doc_count()}</b>\n\n'
         ]
+        overflow_msg = f'\n\n由于 Telegram 消息长度限制，部分对话的统计信息没有展示'
+
+        def append_msg(msg_list: List[str]):  # return whether overflow
+            nonlocal cur_len, sb
+            total_len = sum(len(msg) for msg in msg_list)
+            if cur_len + total_len > length_limit - len(overflow_msg):
+                return True
+            else:
+                cur_len += total_len
+                for msg in msg_list:
+                    sb.append(msg)
+                    return False
+
         if self._cfg.monitor_all:
-            sb.append(f'{len(self.excluded_chats)} 个对话被禁止索引\n')
+            append_msg([f'{len(self.excluded_chats)} 个对话被禁止索引\n'])
             for chat_id in self.excluded_chats:
-                sb.append(f'- {await self.format_dialog_html(chat_id)}\n')
+                append_msg([f'- {await self.format_dialog_html(chat_id)}\n'])
             sb.append('\n')
 
-        sb.append(f'总计 {len(self.monitored_chats)} 个对话被加入了索引：\n')
-        print_limit = 100  # since telegram can send at most 4096 chars per msg
+        append_msg([f'总计 {len(self.monitored_chats)} 个对话被加入了索引：\n'])
         for chat_id in self.monitored_chats:
-            if print_limit > 0:
-                print_limit -= 1
-            else:
-                break
+            msg_for_chat = []
             num = self._indexer.count_by_query(chat_id=str(chat_id))
-            sb.append(f'- {await self.format_dialog_html(chat_id)} '
-                      f'共 {num} 条消息\n')
+            msg_for_chat.append(f'- {await self.format_dialog_html(chat_id)} 共 {num} 条消息\n')
             if newest_msg := self.newest_msg.get(chat_id, None):
-                sb.append(f'  最新消息：<a href="{newest_msg.url}">{brief_content(newest_msg.content)}</a>\n')
-        if print_limit == 0:
-            sb.append(f'\n由于 Telegram 的消息长度限制，最多只显示 100 个对话')
+                msg_for_chat.append(f'  最新消息：<a href="{newest_msg.url}">{brief_content(newest_msg.content)}</a>\n')
+            if append_msg(msg_for_chat):
+                # if overflow
+                sb.append(overflow_msg)
+                break
+
         return ''.join(sb)
 
     async def translate_chat_id(self, chat_id: int) -> str:

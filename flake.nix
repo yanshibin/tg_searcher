@@ -2,32 +2,38 @@
   description = "Tg searcher: a searcher framework for Telegram";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "nixpkgs";
+    flake-utils.url = "flake-utils";
   };
 
   outputs = { self, nixpkgs, flake-utils }:
+    let
+      overlay = final: prev: {
+        tg-searcher = final.python3.pkgs.callPackage ./nix/searcher-pkg.nix { };
+      };
+    in
     flake-utils.lib.eachDefaultSystem
       (system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
-          searcher-pkg = pkgs.callPackage ./nix/searcher-pkg.nix { };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ overlay ];
+          };
+          pkg = pkgs.tg-searcher;
         in
         {
-          devShell = pkgs.mkShell {
-            buildInputs = [ searcher-pkg ];
-          };
+          packages.default = pkg;
 
-          defaultApp = searcher-pkg;
-          defaultPackage = searcher-pkg;
+          devShell = pkg.overrideAttrs (oldAttrs: {
+            nativeBuildInputs = oldAttrs.nativeBuildInputs ++ [ pkgs.pdm ];
+          });
+
+          apps.default = flake-utils.lib.mkApp { drv = pkg; };
         }
       )
     // {
-      overlays.default = final: prev: {
-        tg-searcher = self.defaultPackage.${prev.system};
-      };
+      overlays.default = overlay;
       nixosModules.default = {
-        nixpkgs.overlays = [ self.overlays.default ];
         imports = [ ./nix/searcher-service.nix ];
       };
     };
